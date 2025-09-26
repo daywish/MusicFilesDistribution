@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'   # push tags like v1.0.0 to trigger
+
+permissions:
+  contents: write
+
+env:
+  # Set this to your project path (relative to repo root)
+  PROJECT_PATH: ./MusicDistribution/MusicDistribution.csproj
+
+jobs:
+  build:
+    name: Build & Package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, osx-arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Compute version from tag (strip leading 'v')
+        shell: bash
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME}"
+          VERSION="${RAW_TAG#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building version: $VERSION"
+
+      - name: Restore
+        run: dotnet restore "$PROJECT_PATH"
+
+      - name: Publish ${{ matrix.rid }} (self-contained single file)
+        run: |
+          dotnet publish "$PROJECT_PATH" -c Release -r ${{ matrix.rid }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=false \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:DebugType=None \
+            -p:Version=${{ env.VERSION }} \
+            -p:AssemblyVersion=${{ env.VERSION }} \
+            -p:FileVersion=${{ env.VERSION }} \
+            -p:InformationalVersion=${{ env.VERSION }} \
+            -o out/${{ matrix.rid }}
+          # Include docs if present
+          [ -f README.md ] && cp README.md out/${{ matrix.rid }}/ || true
+          [ -f LICENSE ] && cp LICENSE out/${{ matrix.rid }}/ || true
+
+      - name: Package ${{ matrix.rid }}
+        shell: bash
+        run: |
+          cd out/${{ matrix.rid }}
+          NAME="MusicDistribution-${{ env.VERSION }}-${{ matrix.rid }}"
+          if [[ "${{ matrix.rid }}" == win* ]]; then
+            zip -r "../../$NAME.zip" .
+          else
+            tar -czf "../../$NAME.tar.gz" .
+          fi
+
+      - name: Upload artifact ${{ matrix.rid }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: MusicDistribution-${{ env.VERSION }}-${{ matrix.rid }}
+          path: |
+            out/MusicDistribution-${{ env.VERSION }}-${{ matrix.rid }}.zip
+            out/MusicDistribution-${{ env.VERSION }}-${{ matrix.rid }}.tar.gz
+          if-no-files-found: ignore
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -laR dist
+
+      - name: Create Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MusicDistribution ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: |
+            ## MusicDistribution ${{ github.ref_name }}
+            - Self-contained, single-file builds for Windows, Linux, and macOS
+            - Version embedded from tag
+            - Includes README and LICENSE (if present)
+
+            ### Installing
+            1. Download the archive for your platform/architecture.
+            2. Extract and run the executable.
+            3. See README for usage examples.
+
+          files: |
+            dist/**/*.zip
+            dist/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
